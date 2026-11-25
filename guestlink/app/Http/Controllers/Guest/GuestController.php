@@ -1917,10 +1917,11 @@ class GuestController extends Controller
         $roomNumber = $room instanceof Room ? $room->room_number : '201';
 
         $request->validate([
-            'question'   => 'nullable|string|max:1000',
-            'history'    => 'nullable',
-            'photo'      => 'nullable|file|image|mimes:jpg,jpeg,png,webp|max:10240',
-            'photo_data' => 'nullable|string|max:15000000',
+            'question'       => 'nullable|string|max:1000',
+            'history'        => 'nullable',
+            'pending_ticket' => 'nullable',
+            'photo'          => 'nullable|file|image|mimes:jpg,jpeg,png,webp|max:10240',
+            'photo_data'     => 'nullable|string|max:15000000',
         ]);
 
         $question = trim((string)($request->input('question') ?? ''));
@@ -1928,6 +1929,61 @@ class GuestController extends Controller
         if (is_string($history)) {
             $decodedHistory = json_decode($history, true);
             $history = is_array($decodedHistory) ? $decodedHistory : [];
+        }
+
+        $pendingTicketInput = $request->input('pending_ticket');
+        if (is_string($pendingTicketInput)) {
+            $decodedPending = json_decode($pendingTicketInput, true);
+            $pendingTicketInput = is_array($decodedPending) ? $decodedPending : null;
+        }
+
+        // Handle conversational confirmation/cancellation if a pending confirmation card is awaiting guest approval
+        if ($room instanceof Room && is_array($pendingTicketInput) && !empty($pendingTicketInput['description'])) {
+            $qLower = strtolower($question);
+            $isAffirmative = (bool) preg_match('/^(yes|yeah|yep|yup|ok|okay|sure|confirm|confirmed|proceed|go\s*ahead|do\s*it|send\s*it|please\s*do|yes\s+please|please\s+proceed|yes[,!\.\s]+(confirm|proceed|send|create|do|please|go\s*ahead))/i', $qLower);
+            $isNegative = (bool) preg_match('/^(no|nope|nah|cancel|never\s*mind|nevermind|stop|don\'?t|do\s+not)/i', $qLower);
+
+            if ($isAffirmative) {
+                $created = $this->dispatchConciergeTicket($room, [
+                    'type'          => $pendingTicketInput['type'] ?? 'service',
+                    'department'    => $pendingTicketInput['department'] ?? 'Front Desk',
+                    'category_hint' => $pendingTicketInput['category'] ?? ($pendingTicketInput['category_hint'] ?? 'Front Desk Concierge'),
+                    'priority'      => $pendingTicketInput['priority'] ?? 'medium',
+                    'human_handoff' => (bool) ($pendingTicketInput['human_handoff'] ?? true),
+                    'description'   => (string) $pendingTicketInput['description'],
+                ], (string) $pendingTicketInput['description'], $gemini);
+
+                $ref  = $created['reference_number'];
+                $dept = $created['department'];
+                return response()->json([
+                    'success' => true,
+                    'data'    => [
+                        'reply'          => "Confirmed! I've created ticket **{$ref}** for **Room {$roomNumber}** and immediately alerted our **{$dept}** team on their live console.\n\nTap **Live Chat** below to message our team directly or track progress.",
+                        'action_type'    => 'track_status',
+                        'action_label'   => 'Open Live Chat & Tracker',
+                        'prefill_type'   => 'track',
+                        'created_ticket' => $created,
+                        'clear_pending'  => true,
+                        'quick_prompts'  => ['View my ticket status', 'Browse in-room dining menu'],
+                        'source'         => 'concierge_confirmed',
+                    ],
+                ]);
+            }
+
+            if ($isNegative) {
+                return response()->json([
+                    'success' => true,
+                    'data'    => [
+                        'reply'         => "No problem — I cancelled that request and did **not** notify the hotel staff. Let me know if there's anything else I can help you with in Room {$roomNumber}!",
+                        'action_type'   => 'general',
+                        'action_label'  => null,
+                        'prefill_type'  => 'none',
+                        'clear_pending' => true,
+                        'quick_prompts' => ['Browse dining menu', 'Function hall info', 'Wi-Fi access'],
+                        'source'        => 'concierge_cancelled',
+                    ],
+                ]);
+            }
         }
 
         // Handle photo attachment (either multipart file or validated base64 image data)
@@ -1976,29 +2032,24 @@ class GuestController extends Controller
             }
         }
 
-        // True Agentic Execution: if guest explicitly asked to talk to Front Desk / notify staff / create a ticket,
-        // create the actual DB ticket & unread staff alert immediately so Front Desk is notified in real time.
+        // Guest-Confirmed Agentic Execution: if guest asked to talk to Front Desk / notify staff / create a ticket,
+        // return a clear confirmation payload so the guest explicitly approves before creating the DB ticket & alerting staff.
         if ($room instanceof Room) {
             $ticketIntent = $this->detectConciergeDirectTicketIntent($question, $response);
             if ($ticketIntent !== null) {
-                try {
-                    $created = $this->dispatchConciergeTicket($room, $ticketIntent, $question, $gemini);
-                    $response['created_ticket'] = $created;
-
-                    $ref  = $created['reference_number'];
-                    $dept = $created['department'];
-                    if ($created['is_existing']) {
-                        $response['reply'] = "I've forwarded your message directly to our **{$dept}** team on your active ticket **{$ref}** and triggered a live alert on their desk console.\n\n"
-                            . "Tap **Open Live Chat** below to continue messaging our team directly, or dial **Ext. 0** for an immediate voice call.";
-                    } else {
-                        $response['reply'] = "Done! I've created ticket **{$ref}** for **Room {$roomNumber}** and immediately alerted our **{$dept}** team on their live operations console.\n\n"
-                            . ($created['human_handoff']
-                                ? "A live **{$dept}** staff member will respond to you directly in Live Chat shortly. Tap **Open Live Chat** below to track updates or send additional details."
-                                : "You can track live progress or message our **{$dept}** team anytime by tapping **Open Live Chat** below.");
-                    }
-                } catch (\Throwable $e) {
-                    Log::error('Madi AI auto-ticket dispatch failed: ' . $e->getMessage());
-                }
+                $dept = $ticketIntent['department'];
+                $prio = ucfirst($ticketIntent['priority']);
+                $response['pending_ticket'] = [
+                    'type'          => $ticketIntent['type'],
+                    'department'    => $dept,
+                    'category'      => $ticketIntent['category_hint'],
+                    'priority'      => $ticketIntent['priority'],
+                    'human_handoff' => (bool) $ticketIntent['human_handoff'],
+                    'description'   => $ticketIntent['description'],
+                    'room_number'   => $roomNumber,
+                ];
+                $response['reply'] = "I'm ready to submit this request for **Room {$roomNumber}** and alert our **{$dept}** team (**{$prio}** priority).\n\n"
+                    . "Please review the summary below and tap **Confirm & Notify {$dept}** (or reply **\"Yes\"**) to send it right away — no alert has been sent yet.";
             }
         }
 
@@ -2009,7 +2060,7 @@ class GuestController extends Controller
     }
 
     /**
-     * 1-Click Direct Ticket Creation endpoint triggered from Madi AI Concierge action buttons.
+     * Confirmed Direct Ticket Creation endpoint triggered from Madi AI Concierge confirmation card.
      */
     public function createTicketFromConcierge(Request $request, string $token, GeminiService $gemini)
     {
@@ -2022,6 +2073,7 @@ class GuestController extends Controller
             'type'          => 'nullable|in:service,maintenance',
             'department'    => 'nullable|string|max:60',
             'category'      => 'nullable|string|max:100',
+            'priority'      => 'nullable|in:low,medium,high,urgent',
             'description'   => 'required|string|max:1000',
             'human_handoff' => 'nullable|boolean',
         ]);
@@ -2034,11 +2086,12 @@ class GuestController extends Controller
         };
 
         $desc = trim($validated['description']);
+        $defaultPriority = $department === 'Maintenance' ? 'high' : ($department === 'Housekeeping' ? 'low' : 'medium');
         $created = $this->dispatchConciergeTicket($room, [
             'type'          => ($validated['type'] ?? ($department === 'Maintenance' ? 'maintenance' : 'service')),
             'department'    => $department,
             'category_hint' => $validated['category'] ?? ($department === 'Front Desk' ? 'Front Desk Concierge' : ''),
-            'priority'      => $department === 'Maintenance' ? 'high' : ($department === 'Housekeeping' ? 'low' : 'medium'),
+            'priority'      => $validated['priority'] ?? $defaultPriority,
             'human_handoff' => (bool) ($validated['human_handoff'] ?? ($department === 'Front Desk')),
             'description'   => $desc,
         ], $desc, $gemini);

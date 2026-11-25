@@ -27,9 +27,10 @@
                     </div>
                 </div>
                 <div class="flex items-center gap-1.5">
-                    <button type="button" onclick="resetAiConciergeChat()" title="Restart chat session" aria-label="Restart chat"
-                            class="w-8 h-8 rounded-full bg-white/[0.04] border border-[color:var(--mp-hairline-md)] text-[#A8A397] hover:text-[color:var(--mp-gold-bright)] hover:border-[color:var(--mp-line-strong)] flex items-center justify-center text-xs cursor-pointer transition-colors">
-                        <i class="bi bi-arrow-counterclockwise"></i>
+                    <button type="button" onclick="resetAiConciergeChat()" title="Start a clean new conversation" aria-label="New chat"
+                            class="h-8 px-2.5 rounded-full bg-white/[0.04] border border-[color:var(--mp-hairline-md)] text-[#E7E2D7] hover:text-[color:var(--mp-gold-bright)] hover:border-[color:var(--mp-line-strong)] inline-flex items-center gap-1 text-[11px] font-semibold cursor-pointer transition-colors whitespace-nowrap">
+                        <i class="bi bi-plus-lg text-[11px]"></i>
+                        <span>New Chat</span>
                     </button>
                     <button type="button" onclick="closeAiConciergeDrawer()" title="Close concierge" aria-label="Close concierge"
                             class="w-8 h-8 rounded-full bg-white/[0.04] border border-[color:var(--mp-hairline-md)] text-[#A8A397] hover:text-white hover:border-white/25 flex items-center justify-center text-xs cursor-pointer transition-colors">
@@ -178,11 +179,38 @@ const foodMenuRoute = "{{ route('guest.food', $conciergeToken) }}";
 const eventsRoute = "{{ route('guest.events', $conciergeToken) }}";
 const trackRoute = "{{ route('guest.track', $conciergeToken) }}";
 
+const MADI_STORAGE_KEY = `guestlink_madi_chat_${aiConciergeToken}`;
+const MADI_STORAGE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours auto-expiry per room QR token
+const MADI_MAX_SAVED_ITEMS = 26;
+
 let aiConversationHistory = [];
+let aiPersistedEntries = [];
+let activePendingTicket = null;
 let speechRecognizer = null;
 let isListening = false;
 let attachedPhotoFile = null;
 let attachedPhotoDataUrl = null;
+
+function saveMadiSession() {
+    try {
+        const trimmed = aiPersistedEntries.slice(-MADI_MAX_SAVED_ITEMS);
+        aiPersistedEntries = trimmed;
+        localStorage.setItem(MADI_STORAGE_KEY, JSON.stringify({
+            savedAt: Date.now(),
+            entries: trimmed,
+            pendingTicket: activePendingTicket
+        }));
+    } catch (e) {
+        // Ignore storage quota / private mode errors gracefully
+    }
+}
+
+function clearMadiSession() {
+    aiConversationHistory = [];
+    aiPersistedEntries = [];
+    activePendingTicket = null;
+    try { localStorage.removeItem(MADI_STORAGE_KEY); } catch (e) {}
+}
 
 function openAiConciergeDrawer() {
     const backdrop = document.getElementById('aiConciergeBackdrop');
@@ -196,6 +224,8 @@ function openAiConciergeDrawer() {
     }, 10);
 
     setTimeout(() => {
+        const feed = document.getElementById('aiChatFeed');
+        if (feed) feed.scrollTop = feed.scrollHeight;
         document.getElementById('aiConciergeInput')?.focus();
     }, 300);
 }
@@ -220,7 +250,7 @@ function closeAiConciergeDrawer(event) {
 }
 
 function resetAiConciergeChat() {
-    aiConversationHistory = [];
+    clearMadiSession();
     const container = document.getElementById('aiDynamicMessages');
     if (container) container.innerHTML = '';
     
@@ -452,29 +482,19 @@ function handleSendAiMessage(event) {
     }
     clearAiAttachedPhoto();
 
-    // 1. Render User Question Bubble (with image preview if attached)
-    const container = document.getElementById('aiDynamicMessages');
-    const userBubble = document.createElement('div');
-    userBubble.className = 'flex justify-end';
-
-    let photoHtml = '';
-    if (currentPhotoDataUrl) {
-        photoHtml = `
-            <div class="mb-2 rounded-xl overflow-hidden border border-black/30 shadow-md">
-                <img src="${currentPhotoDataUrl}" alt="Guest attachment" class="w-full max-h-48 object-cover">
-            </div>
-        `;
-    }
-
     const displayText = question || (currentPhotoDataUrl ? 'Please inspect this photo from Room {{ $roomNum }}.' : '');
 
-    userBubble.innerHTML = `
-        <div class="max-w-[85%] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[#140F04] font-medium text-xs leading-relaxed shadow-sm" style="background:var(--mp-metal);">
-            ${photoHtml}
-            <div>${displayText.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
-        </div>
-    `;
-    container.appendChild(userBubble);
+    // 1. Render & persist User Question Bubble
+    const userEntry = {
+        id: 'u_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+        role: 'user',
+        text: displayText,
+        hasPhoto: !!currentPhotoDataUrl
+    };
+    aiPersistedEntries.push(userEntry);
+    aiConversationHistory.push({ role: 'user', content: displayText });
+    saveMadiSession();
+    renderMadiUserBubble(userEntry, currentPhotoDataUrl);
 
     // Scroll to bottom
     const feed = document.getElementById('aiChatFeed');
@@ -489,12 +509,13 @@ function handleSendAiMessage(event) {
     loading.classList.remove('hidden');
     feed.scrollTop = feed.scrollHeight;
 
-    aiConversationHistory.push({ role: 'user', content: displayText });
-
     // 2. Build Request (FormData for file/image support)
     const formData = new FormData();
     formData.append('question', displayText);
     formData.append('history', JSON.stringify(aiConversationHistory));
+    if (activePendingTicket) {
+        formData.append('pending_ticket', JSON.stringify(activePendingTicket));
+    }
 
     if (currentPhotoFile) {
         formData.append('photo', currentPhotoFile);
@@ -522,131 +543,245 @@ function handleSendAiMessage(event) {
         const data = res.data;
         aiConversationHistory.push({ role: 'assistant', content: data.reply });
 
-        // Render AI Response Bubble
-        const aiBubble = document.createElement('div');
-        aiBubble.className = 'flex items-start gap-2.5';
+        if (data.clear_pending || data.created_ticket) {
+            // Mark any earlier pending confirmation cards as resolved/handled in storage
+            aiPersistedEntries.forEach(e => {
+                if (e.role === 'assistant' && e.pendingTicket && !e.createdTicket && !e.cancelled) {
+                    if (data.created_ticket) {
+                        e.createdTicket = data.created_ticket;
+                    } else {
+                        e.cancelled = true;
+                    }
+                    e.pendingTicket = null;
+                }
+            });
+            activePendingTicket = null;
+        }
 
-        const pType = data.prefill_type || '';
-        const aType = data.action_type || '';
-        const ticket = data.prefill_ticket || {};
-        const createdTicket = data.created_ticket || null;
-        const prefillDesc = encodeURIComponent(ticket.description || '');
-        const prefillCat = encodeURIComponent(ticket.category || '');
+        if (data.pending_ticket) {
+            activePendingTicket = data.pending_ticket;
+        }
 
-        let actionButtonHtml = '';
-        const makeActionCard = (href, icon, label) => `
-            <div class="mt-3 pt-2.5 border-t border-white/10">
-                <a href="${href}" class="mp-btn w-full !min-h-[38px] !py-2 !text-xs">
-                    <i class="bi ${icon}"></i> ${label}
-                </a>
-            </div>
-        `;
-
-        const makeInstantTicketAction = (spec, btnLabel, fallbackHref, fallbackLabel, showCallExt = false) => {
-            const payloadAttr = escapeHtml(JSON.stringify(spec));
-            return `
-                <div class="mt-3 pt-2.5 border-t border-white/10 space-y-2 js-instant-ticket-wrap">
-                    <button type="button" data-ticket-spec="${payloadAttr}" onclick="createTicketDirectlyFromMadi(this)"
-                            class="mp-btn w-full !min-h-[38px] !py-2 !text-xs">
-                        <i class="bi bi-send-check"></i> <span>${escapeHtml(btnLabel)}</span>
-                    </button>
-                    <div class="grid ${showCallExt ? 'grid-cols-2' : 'grid-cols-1'} gap-2">
-                        ${showCallExt ? `<a href="tel:0" class="mp-btn-ghost !min-h-[34px] !py-1.5 !px-2.5 !text-[11px]"><i class="bi bi-telephone"></i> Call Ext. 0</a>` : ''}
-                        <a href="${fallbackHref}" class="mp-btn-ghost !min-h-[34px] !py-1.5 !px-2.5 !text-[11px]">
-                            <i class="bi bi-sliders"></i> ${escapeHtml(fallbackLabel)}
-                        </a>
-                    </div>
-                </div>
-            `;
+        const assistantEntry = {
+            id: 'a_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+            role: 'assistant',
+            reply: data.reply,
+            userPrompt: displayText,
+            actionType: data.action_type || '',
+            actionLabel: data.action_label || '',
+            prefillType: data.prefill_type || '',
+            prefillTicket: data.prefill_ticket || null,
+            pendingTicket: data.pending_ticket || null,
+            createdTicket: data.created_ticket || null,
+            cancelled: false,
+            quickPrompts: Array.isArray(data.quick_prompts) ? data.quick_prompts : []
         };
 
-        if (createdTicket && createdTicket.reference_number) {
-            actionButtonHtml = `
-                <div class="mt-3 pt-2.5 border-t border-emerald-500/25 space-y-2">
-                    <div class="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
-                        <div class="flex items-center gap-2 min-w-0">
-                            <i class="bi bi-check-circle-fill text-emerald-400 text-sm shrink-0"></i>
-                            <div class="min-w-0">
-                                <span class="block text-[11px] font-bold text-emerald-300 truncate">${escapeHtml(createdTicket.reference_number)} &middot; ${escapeHtml(createdTicket.department)} Notified</span>
-                                <span class="block text-[10px] text-[#A8A397]">Live alert sent to hotel staff console</span>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="grid grid-cols-2 gap-2">
-                        <a href="${escapeHtml(createdTicket.track_url)}" class="mp-btn !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
-                            <i class="bi bi-chat-dots"></i> Live Chat
-                        </a>
-                        <a href="tel:0" class="mp-btn-ghost !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
-                            <i class="bi bi-telephone"></i> Call Ext. 0
-                        </a>
-                    </div>
-                </div>
-            `;
-        } else if (aType === 'reserve_hall' || (pType === 'service' && ticket.category && ticket.category.toLowerCase().includes('event'))) {
-            actionButtonHtml = makeActionCard(`${eventsRoute}?desc=${prefillDesc}`, 'bi-calendar3', data.action_label || 'View Function Halls & Reserve');
-        } else if (aType === 'request_housekeeping' || (pType === 'service' && ticket.type !== 'maintenance')) {
-            actionButtonHtml = makeInstantTicketAction(
-                { type: 'service', department: 'Housekeeping', category: ticket.category || 'Extra Towels', description: ticket.description || displayText, human_handoff: false },
-                'Create Housekeeping Ticket Now',
-                `${serviceFormRoute}?category=${prefillCat || 'housekeeping'}&desc=${prefillDesc}`,
-                'Customize in Form'
-            );
-        } else if (aType === 'request_maintenance' || pType === 'maintenance') {
-            actionButtonHtml = makeInstantTicketAction(
-                { type: 'maintenance', department: 'Maintenance', category: ticket.category || 'Air Conditioning', description: ticket.description || displayText, human_handoff: false },
-                'Create Maintenance Ticket Now',
-                `${maintenanceFormRoute}?category=${prefillCat}&desc=${prefillDesc}`,
-                'Attach Photo / Form'
-            );
-        } else if (aType === 'order_food' || pType === 'food') {
-            actionButtonHtml = makeActionCard(foodMenuRoute, 'bi-cup-hot', data.action_label || 'Browse Dining Menu & Order');
-        } else if (aType === 'track_status' || pType === 'track') {
-            actionButtonHtml = makeActionCard(trackRoute, 'bi-clock-history', data.action_label || 'View Live Request Tracker');
-        } else if (aType === 'call_front_desk' || pType === 'front_desk') {
-            actionButtonHtml = makeInstantTicketAction(
-                { type: 'service', department: 'Front Desk', category: 'Front Desk Concierge', description: ticket.description || displayText || 'Guest requested to speak with Front Desk.', human_handoff: true },
-                'Create Ticket & Notify Front Desk Now',
-                `${serviceFormRoute}?category=front desk&desc=${prefillDesc || encodeURIComponent('Front Desk assistance requested.')}`,
-                'Open Form',
-                true
-            );
-        }
+        aiPersistedEntries.push(assistantEntry);
+        saveMadiSession();
+        renderMadiAssistantBubble(assistantEntry);
 
-        let dynamicChipsHtml = '';
-        if (data.quick_prompts && data.quick_prompts.length > 0) {
-            dynamicChipsHtml = `
-                <div class="mt-3 pt-2.5 border-t border-white/10">
-                    <span class="block text-[10px] uppercase tracking-wider font-semibold text-[#8C94A4] mb-1.5">Follow up</span>
-                    <div class="flex flex-wrap gap-1.5">
-                        ${data.quick_prompts.map(qp => `
-                            <button type="button" data-qp="${escapeHtml(qp)}" onclick="sendAiConciergePrompt(this.dataset.qp)"
-                                    class="mp-chip !text-[11px] !py-1 !px-2.5 text-left">
-                                ${escapeHtml(qp)}
-                            </button>
-                        `).join('')}
-                    </div>
-                </div>
-            `;
-        }
-
-        aiBubble.innerHTML = `
-            <div class="w-7 h-7 rounded-lg bg-[rgba(201,162,74,0.1)] border border-[color:var(--mp-line)] flex items-center justify-center text-xs text-[color:var(--mp-gold-bright)] shrink-0 mt-0.5">
-                <i class="bi bi-stars"></i>
-            </div>
-            <div class="ai-reply-bubble max-w-[86%] rounded-2xl rounded-tl-sm p-3.5 bg-[#0E1523] border border-[color:var(--mp-hairline-md)] text-xs leading-relaxed text-[#E7E2D7]">
-                <div>${formatMarkdownText(data.reply)}</div>
-                ${actionButtonHtml}
-                ${dynamicChipsHtml}
-            </div>
-        `;
-
-        container.appendChild(aiBubble);
         feed.scrollTop = feed.scrollHeight;
     })
     .catch(err => {
         loading.classList.add('hidden');
         renderAiErrorBubble("Unable to connect to AI concierge service. Please verify your connection or call Ext. 0.");
     });
+}
+
+function renderMadiUserBubble(entry, livePhotoDataUrl = null) {
+    const container = document.getElementById('aiDynamicMessages');
+    if (!container) return;
+
+    const userBubble = document.createElement('div');
+    userBubble.className = 'flex justify-end';
+
+    let photoHtml = '';
+    if (livePhotoDataUrl) {
+        photoHtml = `
+            <div class="mb-2 rounded-xl overflow-hidden border border-black/30 shadow-md">
+                <img src="${livePhotoDataUrl}" alt="Guest attachment" class="w-full max-h-48 object-cover">
+            </div>
+        `;
+    } else if (entry.hasPhoto) {
+        photoHtml = `
+            <div class="mb-1.5 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/15 text-[10.5px] font-semibold">
+                <i class="bi bi-image"></i> Photo attached
+            </div>
+        `;
+    }
+
+    userBubble.innerHTML = `
+        <div class="max-w-[85%] rounded-2xl rounded-tr-sm px-3.5 py-2.5 text-[#140F04] font-medium text-xs leading-relaxed shadow-sm" style="background:var(--mp-metal);">
+            ${photoHtml}
+            <div>${escapeHtml(entry.text || '')}</div>
+        </div>
+    `;
+    container.appendChild(userBubble);
+}
+
+function buildConfirmedTicketHtml(t) {
+    return `
+        <div class="mt-3 pt-2.5 border-t border-emerald-500/25 space-y-2">
+            <div class="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
+                <div class="flex items-center gap-2 min-w-0">
+                    <i class="bi bi-check-circle-fill text-emerald-400 text-sm shrink-0"></i>
+                    <div class="min-w-0">
+                        <span class="block text-[11px] font-bold text-emerald-300 truncate">${escapeHtml(t.reference_number)} &middot; ${escapeHtml(t.department)} Notified</span>
+                        <span class="block text-[10px] text-[#A8A397]">Live alert sent to hotel staff console</span>
+                    </div>
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+                <a href="${escapeHtml(t.track_url)}" class="mp-btn !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
+                    <i class="bi bi-chat-dots"></i> Live Chat
+                </a>
+                <a href="tel:0" class="mp-btn-ghost !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
+                    <i class="bi bi-telephone"></i> Call Ext. 0
+                </a>
+            </div>
+        </div>
+    `;
+}
+
+function buildPendingConfirmationHtml(spec, entryId) {
+    const payloadAttr = escapeHtml(JSON.stringify(spec));
+    const dept = spec.department || 'Front Desk';
+    const prio = (spec.priority || 'medium').toUpperCase();
+    const summary = spec.description || 'Assistance requested.';
+
+    return `
+        <div class="mt-3 pt-2.5 border-t border-[color:var(--mp-line)] space-y-2.5 js-instant-ticket-wrap" data-entry-id="${escapeHtml(entryId)}">
+            <div class="px-3 py-2.5 rounded-xl bg-white/[0.03] border border-[color:var(--mp-line)] space-y-1.5">
+                <div class="flex items-center justify-between gap-2">
+                    <span class="text-[10px] font-bold uppercase tracking-wider text-[color:var(--mp-gold-bright)]">
+                        <i class="bi bi-shield-check me-1"></i> Confirm Request Details
+                    </span>
+                    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[rgba(201,162,74,0.16)] text-[color:var(--mp-gold-bright)] border border-[color:var(--mp-line)]">
+                        ${escapeHtml(dept)} &middot; ${escapeHtml(prio)}
+                    </span>
+                </div>
+                <p class="text-[11.5px] text-[#E7E2D7] leading-snug m-0">${escapeHtml(summary)}</p>
+            </div>
+            <div class="grid grid-cols-[1fr_auto] gap-2">
+                <button type="button" data-entry-id="${escapeHtml(entryId)}" data-ticket-spec="${payloadAttr}" onclick="createTicketDirectlyFromMadi(this)"
+                        class="mp-btn !min-h-[38px] !py-2 !px-3 !text-xs">
+                    <i class="bi bi-check2-circle"></i> <span>Confirm &amp; Notify ${escapeHtml(dept)}</span>
+                </button>
+                <button type="button" data-entry-id="${escapeHtml(entryId)}" onclick="cancelPendingMadiTicket(this)"
+                        class="mp-btn-ghost !min-h-[38px] !py-2 !px-3 !text-xs">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+function renderMadiAssistantBubble(entry) {
+    const container = document.getElementById('aiDynamicMessages');
+    if (!container) return;
+
+    const aiBubble = document.createElement('div');
+    aiBubble.className = 'flex items-start gap-2.5';
+
+    const pType = entry.prefillType || '';
+    const aType = entry.actionType || '';
+    const ticket = entry.prefillTicket || {};
+    const prefillDesc = encodeURIComponent(ticket.description || '');
+    const prefillCat = encodeURIComponent(ticket.category || '');
+    const displayText = entry.userPrompt || '';
+
+    let actionButtonHtml = '';
+    const makeActionCard = (href, icon, label) => `
+        <div class="mt-3 pt-2.5 border-t border-white/10">
+            <a href="${href}" class="mp-btn w-full !min-h-[38px] !py-2 !text-xs">
+                <i class="bi ${icon}"></i> ${escapeHtml(label)}
+            </a>
+        </div>
+    `;
+
+    if (entry.createdTicket && entry.createdTicket.reference_number) {
+        actionButtonHtml = buildConfirmedTicketHtml(entry.createdTicket);
+    } else if (entry.cancelled) {
+        actionButtonHtml = `
+            <div class="mt-3 pt-2 border-t border-white/10 text-[11px] text-[#8C94A4] flex items-center gap-1.5">
+                <i class="bi bi-x-circle"></i> Request cancelled &mdash; no alert sent to staff.
+            </div>
+        `;
+    } else if (entry.pendingTicket) {
+        actionButtonHtml = buildPendingConfirmationHtml(entry.pendingTicket, entry.id);
+    } else if (aType === 'reserve_hall' || (pType === 'service' && ticket.category && ticket.category.toLowerCase().includes('event'))) {
+        actionButtonHtml = makeActionCard(`${eventsRoute}?desc=${prefillDesc}`, 'bi-calendar3', entry.actionLabel || 'View Function Halls & Reserve');
+    } else if (aType === 'request_housekeeping' || (pType === 'service' && ticket.type !== 'maintenance')) {
+        actionButtonHtml = buildPendingConfirmationHtml({
+            type: 'service', department: 'Housekeeping', category: ticket.category || 'Extra Towels',
+            priority: 'low', description: ticket.description || displayText, human_handoff: false
+        }, entry.id);
+    } else if (aType === 'request_maintenance' || pType === 'maintenance') {
+        actionButtonHtml = buildPendingConfirmationHtml({
+            type: 'maintenance', department: 'Maintenance', category: ticket.category || 'Air Conditioning',
+            priority: 'high', description: ticket.description || displayText, human_handoff: false
+        }, entry.id);
+    } else if (aType === 'order_food' || pType === 'food') {
+        actionButtonHtml = makeActionCard(foodMenuRoute, 'bi-cup-hot', entry.actionLabel || 'Browse Dining Menu & Order');
+    } else if (aType === 'track_status' || pType === 'track') {
+        actionButtonHtml = makeActionCard(trackRoute, 'bi-clock-history', entry.actionLabel || 'View Live Request Tracker');
+    } else if (aType === 'call_front_desk' || pType === 'front_desk') {
+        actionButtonHtml = buildPendingConfirmationHtml({
+            type: 'service', department: 'Front Desk', category: 'Front Desk Concierge',
+            priority: 'medium', description: ticket.description || displayText || 'Guest requested to speak with Front Desk.', human_handoff: true
+        }, entry.id);
+    }
+
+    let dynamicChipsHtml = '';
+    if (entry.quickPrompts && entry.quickPrompts.length > 0 && !entry.pendingTicket) {
+        dynamicChipsHtml = `
+            <div class="mt-3 pt-2.5 border-t border-white/10">
+                <span class="block text-[10px] uppercase tracking-wider font-semibold text-[#8C94A4] mb-1.5">Follow up</span>
+                <div class="flex flex-wrap gap-1.5">
+                    ${entry.quickPrompts.map(qp => `
+                        <button type="button" data-qp="${escapeHtml(qp)}" onclick="sendAiConciergePrompt(this.dataset.qp)"
+                                class="mp-chip !text-[11px] !py-1 !px-2.5 text-left">
+                            ${escapeHtml(qp)}
+                        </button>
+                    `).join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    aiBubble.innerHTML = `
+        <div class="w-7 h-7 rounded-lg bg-[rgba(201,162,74,0.1)] border border-[color:var(--mp-line)] flex items-center justify-center text-xs text-[color:var(--mp-gold-bright)] shrink-0 mt-0.5">
+            <i class="bi bi-stars"></i>
+        </div>
+        <div class="ai-reply-bubble max-w-[86%] rounded-2xl rounded-tl-sm p-3.5 bg-[#0E1523] border border-[color:var(--mp-hairline-md)] text-xs leading-relaxed text-[#E7E2D7]">
+            <div>${formatMarkdownText(entry.reply || '')}</div>
+            ${actionButtonHtml}
+            ${dynamicChipsHtml}
+        </div>
+    `;
+
+    container.appendChild(aiBubble);
+}
+
+function cancelPendingMadiTicket(btn) {
+    if (!btn) return;
+    const entryId = btn.dataset.entryId || '';
+    activePendingTicket = null;
+    const entry = aiPersistedEntries.find(e => e.id === entryId);
+    if (entry) {
+        entry.pendingTicket = null;
+        entry.cancelled = true;
+        saveMadiSession();
+    }
+    const wrap = btn.closest('.js-instant-ticket-wrap');
+    if (wrap) {
+        wrap.innerHTML = `
+            <div class="text-[11px] text-[#8C94A4] flex items-center gap-1.5">
+                <i class="bi bi-x-circle"></i> Request cancelled &mdash; no alert sent to staff.
+            </div>
+        `;
+    }
 }
 
 function createTicketDirectlyFromMadi(btn) {
@@ -658,9 +793,10 @@ function createTicketDirectlyFromMadi(btn) {
         return;
     }
 
+    const entryId = btn.dataset.entryId || '';
     const originalHtml = btn.innerHTML;
     btn.disabled = true;
-    btn.innerHTML = '<span class="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin"></span> <span>Creating ticket &amp; notifying staff...</span>';
+    btn.innerHTML = '<span class="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin"></span> <span>Confirming &amp; notifying...</span>';
 
     fetch(conciergeTicketEndpoint, {
         method: 'POST',
@@ -681,27 +817,16 @@ function createTicketDirectlyFromMadi(btn) {
             return;
         }
         const t = res.ticket;
+        activePendingTicket = null;
+        const entry = aiPersistedEntries.find(e => e.id === entryId);
+        if (entry) {
+            entry.pendingTicket = null;
+            entry.createdTicket = t;
+            saveMadiSession();
+        }
         const wrap = btn.closest('.js-instant-ticket-wrap');
         if (wrap) {
-            wrap.innerHTML = `
-                <div class="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
-                    <div class="flex items-center gap-2 min-w-0">
-                        <i class="bi bi-check-circle-fill text-emerald-400 text-sm shrink-0"></i>
-                        <div class="min-w-0">
-                            <span class="block text-[11px] font-bold text-emerald-300 truncate">${escapeHtml(t.reference_number)} &middot; ${escapeHtml(t.department)} Notified</span>
-                            <span class="block text-[10px] text-[#A8A397]">Live alert sent to hotel staff console</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="grid grid-cols-2 gap-2">
-                    <a href="${escapeHtml(t.track_url)}" class="mp-btn !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
-                        <i class="bi bi-chat-dots"></i> Live Chat
-                    </a>
-                    <a href="tel:0" class="mp-btn-ghost !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
-                        <i class="bi bi-telephone"></i> Call Ext. 0
-                    </a>
-                </div>
-            `;
+            wrap.outerHTML = buildConfirmedTicketHtml(t);
         }
         const feed = document.getElementById('aiChatFeed');
         if (feed) feed.scrollTop = feed.scrollHeight;
@@ -711,6 +836,44 @@ function createTicketDirectlyFromMadi(btn) {
         btn.innerHTML = originalHtml;
         renderAiErrorBubble('Connection error while creating ticket. Please retry or dial Ext. 0.');
     });
+}
+
+function restoreMadiSession() {
+    try {
+        const raw = localStorage.getItem(MADI_STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (!parsed || !Array.isArray(parsed.entries) || parsed.entries.length === 0) return;
+        if (parsed.savedAt && (Date.now() - parsed.savedAt) > MADI_STORAGE_TTL_MS) {
+            localStorage.removeItem(MADI_STORAGE_KEY);
+            return;
+        }
+
+        aiPersistedEntries = parsed.entries.slice(-MADI_MAX_SAVED_ITEMS);
+        activePendingTicket = parsed.pendingTicket || null;
+        aiConversationHistory = [];
+
+        const chipsContainer = document.getElementById('aiQuickChipsContainer');
+        if (chipsContainer) chipsContainer.classList.add('hidden');
+
+        aiPersistedEntries.forEach(entry => {
+            if (entry.role === 'user') {
+                aiConversationHistory.push({ role: 'user', content: entry.text || '' });
+                renderMadiUserBubble(entry, null);
+            } else if (entry.role === 'assistant') {
+                aiConversationHistory.push({ role: 'assistant', content: entry.reply || '' });
+                renderMadiAssistantBubble(entry);
+            }
+        });
+    } catch (e) {
+        // Safe fallback if localStorage is corrupted
+    }
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', restoreMadiSession);
+} else {
+    restoreMadiSession();
 }
 
 function renderAiErrorBubble(errorMsg) {
