@@ -1,0 +1,41 @@
+# Render.com 1-Click Blueprint for GuestLink – Madison Park Hotel
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: guestlink-madison-park
+    runtime: docker
+    plan: free
+    rootDir: guestlink
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /up
+    envVars:
+      - key: APP_NAME
+        value: "GuestLink – Madison Park Hotel"
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: APP_KEY
+        generateValue: true
+      - key: LOG_CHANNEL
+        value: stderr
+      - key: LOG_LEVEL
+        value: warning
+      - key: DB_CONNECTION
+        value: sqlite
+      - key: DB_JOURNAL_MODE
+        value: WAL
+      - key: DB_BUSY_TIMEOUT
+        value: "10000"
+      - key: DB_SYNCHRONOUS
+        value: NORMAL
+      - key: SESSION_DRIVER
+        value: file
+      - key: CACHE_STORE
+        value: file
+      - key: QUEUE_CONNECTION
+        value: sync
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash-lite
+      - key: GEMINI_API_KEY
+        sync: false
