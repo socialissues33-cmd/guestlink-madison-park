@@ -321,7 +321,8 @@
             .auth-shell { grid-template-columns: 1fr; }
             .auth-stage { display: none; }
             .auth-panel {
-                padding: 2rem 1.25rem;
+                padding: 1.1rem 1.1rem 2rem;
+                justify-content: center;
                 background:
                     linear-gradient(180deg, rgba(7, 11, 18, 0.88) 0%, rgba(7, 11, 18, 0.96) 100%),
                     url('{{ asset("images/hotel/madison-entrance-night2-wide.jpg") }}') center top/cover no-repeat;
@@ -335,15 +336,26 @@
                 max-width: 440px;
                 box-shadow: 0 24px 60px rgba(0, 0, 0, 0.75);
             }
+            .login-theme-bar {
+                position: static !important;
+                width: 100%;
+                max-width: 440px;
+                display: flex;
+                justify-content: flex-end;
+                margin-bottom: 0.75rem;
+            }
             .mobile-brand { display: block; }
             .panel-eyebrow, .panel-title, .panel-sub { text-align: center; }
             .field-input { font-size: 16px; }
         }
-        .login-theme-float {
+        .login-theme-bar {
             position: absolute;
             top: 1.5rem;
             right: 1.75rem;
             z-index: 10;
+        }
+        .login-theme-float {
+            position: static;
         }
         /* Crisp Alabaster & Royal Gold Light Mode on Login (Full-Bleed Fade to Center) */
         html[data-theme="light"],
@@ -466,18 +478,18 @@
             }
             html[data-theme="light"] .auth-panel {
                 background: #F4F5F7;
-                padding: 2rem 1.25rem;
+                padding: 1.1rem 1.1rem 2rem;
             }
-            html[data-theme="light"] .login-theme-float {
-                top: 1.25rem;
-                right: 1.25rem;
+            html[data-theme="light"] .login-theme-bar {
+                position: static !important;
+                top: auto;
+                right: auto;
             }
             html[data-theme="light"] .auth-form-wrap {
                 background: rgba(255, 255, 255, 0.97);
                 border-color: #D8D1C2;
                 box-shadow: 0 20px 48px rgba(15, 23, 42, 0.12);
             }
-            .login-theme-float { top: 1rem; right: 1rem; }
         }
     </style>
 </head>
@@ -517,11 +529,13 @@
 
     {{-- ── Right Clean Staff Sign-In Workspace ──────────────────────────── --}}
     <main class="auth-panel">
-        <button type="button" id="btnLoginThemeToggle" onclick="toggleGuestLinkTheme()" class="mp-theme-toggle login-theme-float" aria-label="Switch light or dark theme" title="Switch Light / Dark Mode">
-            <span class="icon-sun"><i class="bi bi-sun-fill"></i></span>
-            <span class="icon-moon"><i class="bi bi-moon-stars-fill"></i></span>
-            <span id="loginThemeLabel">Light</span>
-        </button>
+        <div class="login-theme-bar">
+            <button type="button" id="btnLoginThemeToggle" onclick="toggleGuestLinkTheme()" class="mp-theme-toggle login-theme-float" aria-label="Switch light or dark theme" title="Switch Light / Dark Mode">
+                <span class="icon-sun"><i class="bi bi-sun-fill"></i></span>
+                <span class="icon-moon"><i class="bi bi-moon-stars-fill"></i></span>
+                <span id="loginThemeLabel">Light</span>
+            </button>
+        </div>
 
         <div class="auth-form-wrap">
 

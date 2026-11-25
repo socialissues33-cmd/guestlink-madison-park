@@ -1396,9 +1396,10 @@ ACTION RULES FOR RESPONSE (Evaluate in strict order of priority):
 - PRIORITY 5: TRACKING STATUS:
   If guest asks to track existing requests or orders:
   action_type="track_status", action_label="📋 View Live Request Tracker", prefill_type="track"
-- PRIORITY 6: FRONT DESK & BILLING:
-  If guest asks for front desk, wake-up call, late check-out, or billing:
-  action_type="call_front_desk", action_label="🛎️ Contact Front Desk (Ext. 0)", prefill_type="front_desk", prefill_category="Front Desk Concierge"
+- PRIORITY 6: FRONT DESK, HUMAN HANDOFF & BILLING:
+  If guest asks to talk/speak/chat with Front Office, Front Desk, a live human agent, receptionist, or manager, or asks to create a ticket / notify Front Desk / wake-up call / late check-out / billing:
+  action_type="call_front_desk", action_label="🛎️ Connect & Notify Front Desk", prefill_type="front_desk", prefill_category="Front Desk Concierge", prefill_description="Guest in Room {$roomNumber} requested Front Desk assistance: [brief summary]."
+  TRUTHFULNESS RULE: Never invent fake ticket numbers or falsely claim staff were notified on general Q&A. When a guest explicitly asks to talk to Front Desk or create a ticket, keep your reply warm and concise — the GuestLink backend automatically creates a live ticket and alerts the Front Desk console.
 - PRIORITY 7: GENERAL CHAT & INQUIRIES:
   For general talk, advice, questions, local tips, Wi-Fi:
   action_type="general", action_label=null, prefill_type="none"

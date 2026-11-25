@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Guest;
 
 use App\Http\Controllers\Controller;
+use App\Models\AiTriageResult;
 use App\Models\FoodCategory;
 use App\Models\FoodItem;
 use App\Models\FoodOrder;
@@ -12,6 +13,7 @@ use App\Models\RequestCategory;
 use App\Models\Room;
 use App\Models\ServiceRequest;
 use App\Models\RequestStatusLog;
+use App\Models\User;
 use App\Services\GeminiService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -1300,27 +1302,43 @@ class GuestController extends Controller
 
             if ($chosenType === 'request' && $chosenLog && $chosenLog->serviceRequest) {
                 $sr = $chosenLog->serviceRequest;
+                $statusLabel = $sr->display_status ?: ucwords(str_replace('_', ' ', $chosenLog->to_status));
+                $shortTitle = match ($chosenLog->to_status) {
+                    'assigned'    => $sr->isEventInquiry() ? 'Tentative Hold Placed' : 'Request Assigned',
+                    'in_progress' => $sr->isEventInquiry() ? 'FO Appointment Ready' : 'Team On The Way',
+                    'resolved'    => $sr->isEventInquiry() ? 'Booking Confirmed' : 'Request Completed',
+                    'closed'      => 'Request Closed',
+                    default       => 'Request ' . $statusLabel,
+                };
                 $liveNotification = [
                     'id'               => 'req_' . $chosenLog->id,
                     'type'             => 'request',
                     'reference_number' => $sr->reference_number,
                     'status'           => $chosenLog->to_status,
-                    'status_label'     => ucwords(str_replace('_', ' ', $chosenLog->to_status)),
-                    'title'            => ($chosenLog->to_status === 'resolved') ? 'Request Resolved! ✅' : 'Request Updated: ' . ucwords(str_replace('_', ' ', $chosenLog->to_status)),
-                    'message'          => $chosenLog->notes ?: "Your request has been moved to " . ucwords(str_replace('_', ' ', $chosenLog->to_status)) . ".",
+                    'status_label'     => $statusLabel,
+                    'title'            => $shortTitle,
+                    'message'          => $this->formatGuestStatusMessage($sr, $chosenLog),
                     'url'              => route('guest.track', ['token' => $token, 'ref' => $sr->reference_number]),
                     'is_resolved'      => ($chosenLog->to_status === 'resolved'),
                 ];
             } elseif ($chosenType === 'order' && $chosenLog && $chosenLog->foodOrder) {
                 $fo = $chosenLog->foodOrder;
+                $orderTitle = match ($chosenLog->to_status) {
+                    'confirmed' => 'Order Confirmed',
+                    'preparing' => 'Kitchen Preparing',
+                    'ready'     => $fo->isDineIn() ? 'Ready at Times Square' : 'Order On The Way',
+                    'delivered' => 'Order Delivered',
+                    'cancelled' => 'Order Cancelled',
+                    default     => 'Order ' . ucfirst($chosenLog->to_status),
+                };
                 $liveNotification = [
                     'id'               => 'ord_' . $chosenLog->id,
                     'type'             => 'order',
                     'reference_number' => $fo->reference_number,
                     'status'           => $chosenLog->to_status,
                     'status_label'     => ucfirst($chosenLog->to_status),
-                    'title'            => ($chosenLog->to_status === 'delivered') ? 'Order Delivered! 🍽️' : 'Order Update: ' . ucfirst($chosenLog->to_status),
-                    'message'          => $chosenLog->notes ?: "Your food order is now " . ucfirst($chosenLog->to_status) . ".",
+                    'title'            => $orderTitle,
+                    'message'          => $this->formatGuestOrderMessage($fo, $chosenLog),
                     'url'              => route('guest.track', ['token' => $token, 'ref' => $fo->reference_number]),
                     'is_resolved'      => in_array($chosenLog->to_status, ['ready', 'delivered']),
                 ];
@@ -1608,6 +1626,291 @@ class GuestController extends Controller
      * Answers questions regarding function halls, food prices, dining recommendations, reservations,
      * and supports multimodal photo inspection & voice queries.
      */
+    /**
+     * Format polite, guest-facing toast text from RequestStatusLog, stripping internal staff/AI audit strings.
+     */
+    private function formatGuestStatusMessage(ServiceRequest $sr, RequestStatusLog $log): string
+    {
+        $raw = trim((string) ($log->notes ?? ''));
+        $lower = strtolower($raw);
+        $dept = $sr->department ?: 'Front Desk';
+
+        $isInternalAudit = $raw === ''
+            || str_contains($lower, 'ai triage')
+            || str_contains($lower, 'overridden by staff')
+            || str_contains($lower, 'accepted by staff')
+            || str_contains($lower, 'auto-assigned')
+            || str_contains($lower, 'auto-progressed')
+            || str_contains($lower, 'triage accepted')
+            || str_contains($lower, 'triage modified')
+            || str_contains($lower, 'triage overridden')
+            || str_contains($lower, 'created by madi');
+
+        if (!$isInternalAudit) {
+            return \Illuminate\Support\Str::limit($raw, 110);
+        }
+
+        if ($sr->isEventInquiry()) {
+            return match ($log->to_status) {
+                'assigned'    => 'Your tentative event hold has been logged with our Front Office team.',
+                'in_progress' => 'Our Front Office team is ready for your event consultation at the lobby desk.',
+                'resolved'    => 'Your event booking details have been confirmed. Thank you!',
+                'closed'      => 'Your event inquiry has been closed. Message us anytime.',
+                default       => 'Our Front Office team updated your event inquiry.',
+            };
+        }
+
+        return match ($log->to_status) {
+            'assigned'    => "Assigned to our {$dept} team — we're attending to your request.",
+            'in_progress' => "Our {$dept} team is actively working on your request now.",
+            'resolved'    => 'Your request is complete. Tap View to check details or rate our service.',
+            'closed'      => 'This request has been closed. Thank you for staying with us.',
+            default       => "Your request was updated by our {$dept} team.",
+        };
+    }
+
+    /**
+     * Format clean, guest-facing toast text from FoodOrderStatusLog.
+     */
+    private function formatGuestOrderMessage(FoodOrder $fo, FoodOrderStatusLog $log): string
+    {
+        $raw = trim((string) ($log->notes ?? ''));
+        $lower = strtolower($raw);
+        $isInternal = $raw === '' || str_contains($lower, 'auto-progressed');
+
+        if (!$isInternal) {
+            return \Illuminate\Support\Str::limit($raw, 110);
+        }
+
+        return match ($log->to_status) {
+            'confirmed' => 'Times Square Kitchen has confirmed your order.',
+            'preparing' => 'Our chefs are freshly preparing your order now.',
+            'ready'     => $fo->isDineIn()
+                ? 'Your dine-in order is ready at Times Square Restaurant (Ground Floor).'
+                : 'Your order is ready and on its way to your suite.',
+            'delivered' => 'Enjoy your meal! Tap View to rate your dining experience.',
+            'cancelled' => 'Your food order has been cancelled.',
+            default     => 'Your food order status has been updated.',
+        };
+    }
+
+    /**
+     * Detect whether the guest explicitly wants Madi AI to create a live ticket and notify staff
+     * (e.g., talking to Front Office/human staff, notifying Front Desk, or requesting ticket creation).
+     */
+    private function detectConciergeDirectTicketIntent(string $question, array $aiResponse): ?array
+    {
+        $q = strtolower(trim($question));
+        if ($q === '') {
+            return null;
+        }
+
+        // 1. Explicit request to talk/speak/chat with Front Office / Front Desk / human staff or notify them
+        $wantsHumanFo = (bool) preg_match(
+            '/\b(talk|speak|chat|connect|transfer|message|reach|call|notify|alert|inform|escalate)\b.{0,40}\b(front\s*desk|front\s*office|fo\b|reception|receptionist|human|staff|agent|manager|concierge|someone|person)\b/i',
+            $q
+        ) || (bool) preg_match(
+            '/\b(front\s*desk|front\s*office|fo\b|reception)\b.{0,30}\b(talk|speak|chat|connect|notify|alert|help\s*me|contact\s*me|call\s*me)\b/i',
+            $q
+        );
+
+        // 2. Explicit command asking Madi to create/file/submit/open a ticket or request
+        $wantsTicketCreated = (bool) preg_match(
+            '/\b(create|make|file|submit|open|log|send|raise|book|dispatch)\b.{0,30}\b(ticket|request|report|complaint|maintenance|repair|housekeeping|attendant|technician|front\s*desk|front\s*office|fo\b)\b/i',
+            $q
+        );
+
+        if (!$wantsHumanFo && !$wantsTicketCreated) {
+            return null;
+        }
+
+        $actionType = strtolower((string) ($aiResponse['action_type'] ?? ''));
+        $prefill = is_array($aiResponse['prefill_ticket'] ?? null) ? $aiResponse['prefill_ticket'] : [];
+
+        // Determine canonical department, ticket type, and category
+        $isMaint = $actionType === 'request_maintenance'
+            || ($prefill['type'] ?? '') === 'maintenance'
+            || (bool) preg_match('/\b(aircon|ac\b|a\/c|leak|leaking|plumbing|pipe|water\s*heater|hot\s*water|toilet|sink|clog|electrical|outlet|spark|light|bulb|tv|remote|door|lock|repair|broken|not\s*working|maintenance)\b/i', $q);
+
+        $isHousekeeping = !$isMaint && (
+            $actionType === 'request_housekeeping'
+            || (bool) preg_match('/\b(towel|pillow|blanket|linen|sheet|clean|cleaning|housekeeping|toiletries|soap|shampoo|water\s*bottle|bottled\s*water|trash|laundry|slipper)\b/i', $q)
+        );
+
+        if ($wantsHumanFo && !$isMaint && !$isHousekeeping) {
+            return [
+                'type'          => 'service',
+                'department'    => 'Front Desk',
+                'category_hint' => 'Front Desk Concierge',
+                'priority'      => 'medium',
+                'human_handoff' => true,
+                'description'   => "Guest requested to speak with Front Desk via Madi AI: \"{$question}\"",
+            ];
+        }
+
+        if ($isMaint) {
+            return [
+                'type'          => 'maintenance',
+                'department'    => 'Maintenance',
+                'category_hint' => $prefill['category'] ?? 'Air Conditioning',
+                'priority'      => preg_match('/\b(urgent|emergency|spark|fire|flood|heavy\s*leak|leaking\s*water|locked\s*out|no\s*power)\b/i', $q) ? 'urgent' : 'high',
+                'human_handoff' => $wantsHumanFo,
+                'description'   => "Submitted via Madi AI: {$question}",
+            ];
+        }
+
+        if ($isHousekeeping) {
+            return [
+                'type'          => 'service',
+                'department'    => 'Housekeeping',
+                'category_hint' => $prefill['category'] ?? 'Extra Towels',
+                'priority'      => 'low',
+                'human_handoff' => $wantsHumanFo,
+                'description'   => "Submitted via Madi AI: {$question}",
+            ];
+        }
+
+        return [
+            'type'          => 'service',
+            'department'    => 'Front Desk',
+            'category_hint' => $prefill['category'] ?? 'Front Desk Concierge',
+            'priority'      => 'medium',
+            'human_handoff' => true,
+            'description'   => "Submitted via Madi AI: {$question}",
+        ];
+    }
+
+    /**
+     * Create (or append to recent open) ServiceRequest + StatusLog + AiTriageResult + unread TicketMessage
+     * so the Staff/Front Desk dashboard receives an immediate live alert chime & notification.
+     */
+    private function dispatchConciergeTicket(Room $room, array $spec, string $rawGuestMessage, GeminiService $gemini): array
+    {
+        $department   = in_array($spec['department'] ?? '', ['Front Desk', 'Maintenance', 'Housekeeping'], true)
+            ? $spec['department']
+            : 'Front Desk';
+        $type         = ($spec['type'] ?? 'service') === 'maintenance' ? 'maintenance' : 'service';
+        $humanHandoff = (bool) ($spec['human_handoff'] ?? false);
+        $description  = trim((string) ($spec['description'] ?? $rawGuestMessage));
+
+        $stayStart = $room->checked_in_at;
+
+        // Smart anti-duplicate: if an open ticket for the same room + department was created in the last 5 mins,
+        // append the guest's new message so Front Desk gets an immediate unread alert without duplicate tickets.
+        $existing = ServiceRequest::where('room_id', $room->id)
+            ->where('department', $department)
+            ->whereIn('status', ['pending', 'assigned', 'in_progress'])
+            ->when($stayStart, fn($q) => $q->where('created_at', '>=', $stayStart))
+            ->where('created_at', '>=', now()->subMinutes(5))
+            ->latest('id')
+            ->first();
+
+        if ($existing) {
+            if ($humanHandoff && $existing->auto_reply_bot) {
+                $existing->update(['auto_reply_bot' => false]);
+            }
+            $existing->messages()->create([
+                'sender_type' => 'guest',
+                'sender_name' => "Room {$room->room_number} Guest",
+                'message'     => $rawGuestMessage,
+                'is_read'     => false,
+            ]);
+            $existing->touch();
+
+            return [
+                'reference_number' => $existing->reference_number,
+                'department'       => $existing->department,
+                'priority'         => strtolower((string) $existing->priority),
+                'status'           => $existing->status,
+                'human_handoff'    => $humanHandoff,
+                'is_existing'      => true,
+                'track_url'        => route('guest.track', ['token' => $room->qr_token, 'ref' => $existing->reference_number]),
+            ];
+        }
+
+        // Resolve matching active DB RequestCategory
+        $catHint = strtolower(trim((string) ($spec['category_hint'] ?? '')));
+        $category = RequestCategory::where('is_active', true)->get()->first(function ($c) use ($catHint) {
+            return $catHint !== '' && (
+                strtolower($c->name) === $catHint
+                || str_contains(strtolower($c->name), $catHint)
+                || str_contains($catHint, strtolower($c->name))
+            );
+        });
+
+        if (!$category) {
+            $fallbackName = match ($department) {
+                'Maintenance'  => 'Air Conditioning',
+                'Housekeeping' => 'Extra Towels',
+                default        => 'Front Desk Concierge',
+            };
+            $category = RequestCategory::where('is_active', true)->where('name', $fallbackName)->first()
+                ?? RequestCategory::where('is_active', true)->where('type', $type)->first()
+                ?? RequestCategory::where('is_active', true)->first();
+        }
+
+        $priority = strtolower((string) ($spec['priority'] ?? 'medium'));
+        if (!in_array($priority, ['low', 'medium', 'high', 'urgent'], true)) {
+            $priority = 'medium';
+        }
+
+        // Create ticket, initial log, AI triage record, and unread guest message atomically
+        $serviceRequest = DB::transaction(function () use ($room, $type, $category, $description, $priority, $department, $humanHandoff, $rawGuestMessage) {
+            $sr = ServiceRequest::create([
+                'room_id'        => $room->id,
+                'category_id'    => $category?->id,
+                'type'           => $type,
+                'guest_name'     => "Room {$room->room_number} Guest",
+                'description'    => $description,
+                'status'         => 'pending',
+                'priority'       => $priority,
+                'department'     => $department,
+                'auto_reply_bot' => $humanHandoff ? false : User::isBotAutoReplyDefaultEnabled(),
+            ]);
+
+            RequestStatusLog::create([
+                'service_request_id' => $sr->id,
+                'from_status'        => null,
+                'to_status'          => 'pending',
+                'changed_by'         => null,
+                'notes'              => "Created by Madi AI Concierge on behalf of Room {$room->room_number}.",
+            ]);
+
+            AiTriageResult::create([
+                'service_request_id'   => $sr->id,
+                'suggested_category'   => $category?->name ?? 'Front Desk Concierge',
+                'suggested_priority'   => $priority,
+                'suggested_department' => $department,
+                'reason'               => $humanHandoff
+                    ? "Guest directly requested live {$department} assistance via Madi AI Concierge; routed immediately with live chat enabled."
+                    : "Direct guest request submitted through Madi AI Concierge and routed to {$department}.",
+                'status'               => 'pending',
+            ]);
+
+            $sr->messages()->create([
+                'sender_type' => 'guest',
+                'sender_name' => "Room {$room->room_number} Guest",
+                'message'     => $rawGuestMessage,
+                'is_read'     => false,
+            ]);
+
+            return $sr;
+        });
+
+        return [
+            'reference_number' => $serviceRequest->reference_number,
+            'department'       => $serviceRequest->department,
+            'priority'         => strtolower((string) $serviceRequest->priority),
+            'status'           => $serviceRequest->status,
+            'human_handoff'    => $humanHandoff,
+            'is_existing'      => false,
+            'track_url'        => route('guest.track', ['token' => $room->qr_token, 'ref' => $serviceRequest->reference_number]),
+        ];
+    }
+
+    /**
+     * AI Concierge Interactive Chat Endpoint (supports live text, voice transcripts, and photo attachments).
+     */
     public function askAiConcierge(Request $request, string $token, GeminiService $gemini)
     {
         $room = $this->resolveRoom($token);
@@ -1664,29 +1967,87 @@ class GuestController extends Controller
                 $imagePath,
                 $imageMime
             );
-
-            if ($tempFileCreated && $imagePath && file_exists($imagePath)) {
-                @unlink($imagePath);
-            }
-
-            return response()->json([
-                'success' => true,
-                'data'    => $response,
-            ]);
         } catch (\Throwable $e) {
             Log::error('AI Concierge ask failed: ' . $e->getMessage(), ['exception' => $e]);
-
+            $response = $gemini->fallbackConciergeAnswer($question, $roomNumber, $imagePath);
+        } finally {
             if ($tempFileCreated && $imagePath && file_exists($imagePath)) {
                 @unlink($imagePath);
             }
-
-            // Failover to heuristic concierge answer
-            $fallback = $gemini->fallbackConciergeAnswer($question, $roomNumber, $imagePath);
-            return response()->json([
-                'success' => true,
-                'data'    => $fallback,
-            ]);
         }
+
+        // True Agentic Execution: if guest explicitly asked to talk to Front Desk / notify staff / create a ticket,
+        // create the actual DB ticket & unread staff alert immediately so Front Desk is notified in real time.
+        if ($room instanceof Room) {
+            $ticketIntent = $this->detectConciergeDirectTicketIntent($question, $response);
+            if ($ticketIntent !== null) {
+                try {
+                    $created = $this->dispatchConciergeTicket($room, $ticketIntent, $question, $gemini);
+                    $response['created_ticket'] = $created;
+
+                    $ref  = $created['reference_number'];
+                    $dept = $created['department'];
+                    if ($created['is_existing']) {
+                        $response['reply'] = "I've forwarded your message directly to our **{$dept}** team on your active ticket **{$ref}** and triggered a live alert on their desk console.\n\n"
+                            . "Tap **Open Live Chat** below to continue messaging our team directly, or dial **Ext. 0** for an immediate voice call.";
+                    } else {
+                        $response['reply'] = "Done! I've created ticket **{$ref}** for **Room {$roomNumber}** and immediately alerted our **{$dept}** team on their live operations console.\n\n"
+                            . ($created['human_handoff']
+                                ? "A live **{$dept}** staff member will respond to you directly in Live Chat shortly. Tap **Open Live Chat** below to track updates or send additional details."
+                                : "You can track live progress or message our **{$dept}** team anytime by tapping **Open Live Chat** below.");
+                    }
+                } catch (\Throwable $e) {
+                    Log::error('Madi AI auto-ticket dispatch failed: ' . $e->getMessage());
+                }
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'data'    => $response,
+        ]);
+    }
+
+    /**
+     * 1-Click Direct Ticket Creation endpoint triggered from Madi AI Concierge action buttons.
+     */
+    public function createTicketFromConcierge(Request $request, string $token, GeminiService $gemini)
+    {
+        $room = $this->resolveRoom($token);
+        if (!($room instanceof Room)) {
+            return response()->json(['success' => false, 'message' => 'Invalid room session.'], 404);
+        }
+
+        $validated = $request->validate([
+            'type'          => 'nullable|in:service,maintenance',
+            'department'    => 'nullable|string|max:60',
+            'category'      => 'nullable|string|max:100',
+            'description'   => 'required|string|max:1000',
+            'human_handoff' => 'nullable|boolean',
+        ]);
+
+        $deptRaw = strtolower(trim((string) ($validated['department'] ?? '')));
+        $department = match (true) {
+            str_contains($deptRaw, 'maint') || str_contains($deptRaw, 'eng') || ($validated['type'] ?? '') === 'maintenance' => 'Maintenance',
+            str_contains($deptRaw, 'house') => 'Housekeeping',
+            default => 'Front Desk',
+        };
+
+        $desc = trim($validated['description']);
+        $created = $this->dispatchConciergeTicket($room, [
+            'type'          => ($validated['type'] ?? ($department === 'Maintenance' ? 'maintenance' : 'service')),
+            'department'    => $department,
+            'category_hint' => $validated['category'] ?? ($department === 'Front Desk' ? 'Front Desk Concierge' : ''),
+            'priority'      => $department === 'Maintenance' ? 'high' : ($department === 'Housekeeping' ? 'low' : 'medium'),
+            'human_handoff' => (bool) ($validated['human_handoff'] ?? ($department === 'Front Desk')),
+            'description'   => $desc,
+        ], $desc, $gemini);
+
+        return response()->json([
+            'success' => true,
+            'ticket'  => $created,
+            'message' => "Ticket {$created['reference_number']} created and {$created['department']} has been notified.",
+        ]);
     }
 
     /**

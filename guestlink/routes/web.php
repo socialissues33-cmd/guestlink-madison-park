@@ -40,6 +40,7 @@ Route::prefix('guest/{token}')->name('guest.')->middleware(['throttle:guest-read
     Route::get('/requests/{ref}/messages',  [GuestController::class, 'getTicketMessages'])->name('requests.messages');
     Route::post('/requests/{ref}/messages', [GuestController::class, 'sendTicketMessage'])->name('requests.messages.store')->middleware('throttle:guest-write');
     Route::post('/concierge-ask',           [GuestController::class, 'askAiConcierge'])->name('concierge.ask')->middleware('throttle:guest-ai');
+    Route::post('/concierge-ticket',        [GuestController::class, 'createTicketFromConcierge'])->name('concierge.ticket')->middleware('throttle:guest-write');
 });
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────

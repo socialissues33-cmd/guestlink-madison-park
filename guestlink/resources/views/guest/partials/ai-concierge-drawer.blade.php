@@ -171,6 +171,7 @@
 <script>
 const aiConciergeToken = "{{ $conciergeToken }}";
 const conciergeAskEndpoint = "{{ route('guest.concierge.ask', $conciergeToken) }}";
+const conciergeTicketEndpoint = "{{ route('guest.concierge.ticket', $conciergeToken) }}";
 const serviceFormRoute = "{{ route('guest.service', $conciergeToken) }}";
 const maintenanceFormRoute = "{{ route('guest.maintenance', $conciergeToken) }}";
 const foodMenuRoute = "{{ route('guest.food', $conciergeToken) }}";
@@ -528,6 +529,7 @@ function handleSendAiMessage(event) {
         const pType = data.prefill_type || '';
         const aType = data.action_type || '';
         const ticket = data.prefill_ticket || {};
+        const createdTicket = data.created_ticket || null;
         const prefillDesc = encodeURIComponent(ticket.description || '');
         const prefillCat = encodeURIComponent(ticket.category || '');
 
@@ -539,28 +541,75 @@ function handleSendAiMessage(event) {
                 </a>
             </div>
         `;
-        if (aType === 'reserve_hall' || (pType === 'service' && ticket.category && ticket.category.toLowerCase().includes('event'))) {
+
+        const makeInstantTicketAction = (spec, btnLabel, fallbackHref, fallbackLabel, showCallExt = false) => {
+            const payloadAttr = escapeHtml(JSON.stringify(spec));
+            return `
+                <div class="mt-3 pt-2.5 border-t border-white/10 space-y-2 js-instant-ticket-wrap">
+                    <button type="button" data-ticket-spec="${payloadAttr}" onclick="createTicketDirectlyFromMadi(this)"
+                            class="mp-btn w-full !min-h-[38px] !py-2 !text-xs">
+                        <i class="bi bi-send-check"></i> <span>${escapeHtml(btnLabel)}</span>
+                    </button>
+                    <div class="grid ${showCallExt ? 'grid-cols-2' : 'grid-cols-1'} gap-2">
+                        ${showCallExt ? `<a href="tel:0" class="mp-btn-ghost !min-h-[34px] !py-1.5 !px-2.5 !text-[11px]"><i class="bi bi-telephone"></i> Call Ext. 0</a>` : ''}
+                        <a href="${fallbackHref}" class="mp-btn-ghost !min-h-[34px] !py-1.5 !px-2.5 !text-[11px]">
+                            <i class="bi bi-sliders"></i> ${escapeHtml(fallbackLabel)}
+                        </a>
+                    </div>
+                </div>
+            `;
+        };
+
+        if (createdTicket && createdTicket.reference_number) {
+            actionButtonHtml = `
+                <div class="mt-3 pt-2.5 border-t border-emerald-500/25 space-y-2">
+                    <div class="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
+                        <div class="flex items-center gap-2 min-w-0">
+                            <i class="bi bi-check-circle-fill text-emerald-400 text-sm shrink-0"></i>
+                            <div class="min-w-0">
+                                <span class="block text-[11px] font-bold text-emerald-300 truncate">${escapeHtml(createdTicket.reference_number)} &middot; ${escapeHtml(createdTicket.department)} Notified</span>
+                                <span class="block text-[10px] text-[#A8A397]">Live alert sent to hotel staff console</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2">
+                        <a href="${escapeHtml(createdTicket.track_url)}" class="mp-btn !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
+                            <i class="bi bi-chat-dots"></i> Live Chat
+                        </a>
+                        <a href="tel:0" class="mp-btn-ghost !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
+                            <i class="bi bi-telephone"></i> Call Ext. 0
+                        </a>
+                    </div>
+                </div>
+            `;
+        } else if (aType === 'reserve_hall' || (pType === 'service' && ticket.category && ticket.category.toLowerCase().includes('event'))) {
             actionButtonHtml = makeActionCard(`${eventsRoute}?desc=${prefillDesc}`, 'bi-calendar3', data.action_label || 'View Function Halls & Reserve');
         } else if (aType === 'request_housekeeping' || (pType === 'service' && ticket.type !== 'maintenance')) {
-            actionButtonHtml = makeActionCard(`${serviceFormRoute}?category=${prefillCat || 'housekeeping'}&desc=${prefillDesc}`, 'bi-bell', data.action_label || 'Submit Housekeeping Request');
+            actionButtonHtml = makeInstantTicketAction(
+                { type: 'service', department: 'Housekeeping', category: ticket.category || 'Extra Towels', description: ticket.description || displayText, human_handoff: false },
+                'Create Housekeeping Ticket Now',
+                `${serviceFormRoute}?category=${prefillCat || 'housekeeping'}&desc=${prefillDesc}`,
+                'Customize in Form'
+            );
         } else if (aType === 'request_maintenance' || pType === 'maintenance') {
-            actionButtonHtml = makeActionCard(`${maintenanceFormRoute}?category=${prefillCat}&desc=${prefillDesc}`, 'bi-wrench-adjustable', data.action_label || 'Report Issue to Maintenance');
+            actionButtonHtml = makeInstantTicketAction(
+                { type: 'maintenance', department: 'Maintenance', category: ticket.category || 'Air Conditioning', description: ticket.description || displayText, human_handoff: false },
+                'Create Maintenance Ticket Now',
+                `${maintenanceFormRoute}?category=${prefillCat}&desc=${prefillDesc}`,
+                'Attach Photo / Form'
+            );
         } else if (aType === 'order_food' || pType === 'food') {
             actionButtonHtml = makeActionCard(foodMenuRoute, 'bi-cup-hot', data.action_label || 'Browse Dining Menu & Order');
         } else if (aType === 'track_status' || pType === 'track') {
             actionButtonHtml = makeActionCard(trackRoute, 'bi-clock-history', data.action_label || 'View Live Request Tracker');
         } else if (aType === 'call_front_desk' || pType === 'front_desk') {
-            actionButtonHtml = `
-                <div class="mt-3 pt-2.5 border-t border-white/10 grid grid-cols-2 gap-2">
-                    <a href="tel:0" class="mp-btn-ghost !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
-                        <i class="bi bi-telephone"></i> Ext. 0
-                    </a>
-                    <a href="${serviceFormRoute}?category=front desk&desc=${prefillDesc || encodeURIComponent('Front Desk assistance requested.')}"
-                       class="mp-btn !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
-                        <i class="bi bi-chat-dots"></i> Message
-                    </a>
-                </div>
-            `;
+            actionButtonHtml = makeInstantTicketAction(
+                { type: 'service', department: 'Front Desk', category: 'Front Desk Concierge', description: ticket.description || displayText || 'Guest requested to speak with Front Desk.', human_handoff: true },
+                'Create Ticket & Notify Front Desk Now',
+                `${serviceFormRoute}?category=front desk&desc=${prefillDesc || encodeURIComponent('Front Desk assistance requested.')}`,
+                'Open Form',
+                true
+            );
         }
 
         let dynamicChipsHtml = '';
@@ -597,6 +646,70 @@ function handleSendAiMessage(event) {
     .catch(err => {
         loading.classList.add('hidden');
         renderAiErrorBubble("Unable to connect to AI concierge service. Please verify your connection or call Ext. 0.");
+    });
+}
+
+function createTicketDirectlyFromMadi(btn) {
+    if (!btn || btn.disabled) return;
+    let spec = {};
+    try {
+        spec = JSON.parse(btn.dataset.ticketSpec || '{}');
+    } catch (e) {
+        return;
+    }
+
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin"></span> <span>Creating ticket &amp; notifying staff...</span>';
+
+    fetch(conciergeTicketEndpoint, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-TOKEN': '{{ csrf_token() }}',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json'
+        },
+        body: JSON.stringify(spec)
+    })
+    .then(res => res.json())
+    .then(res => {
+        if (!res || !res.success || !res.ticket) {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+            renderAiErrorBubble(res?.message || 'Could not create ticket right now. Please try again or call Ext. 0.');
+            return;
+        }
+        const t = res.ticket;
+        const wrap = btn.closest('.js-instant-ticket-wrap');
+        if (wrap) {
+            wrap.innerHTML = `
+                <div class="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
+                    <div class="flex items-center gap-2 min-w-0">
+                        <i class="bi bi-check-circle-fill text-emerald-400 text-sm shrink-0"></i>
+                        <div class="min-w-0">
+                            <span class="block text-[11px] font-bold text-emerald-300 truncate">${escapeHtml(t.reference_number)} &middot; ${escapeHtml(t.department)} Notified</span>
+                            <span class="block text-[10px] text-[#A8A397]">Live alert sent to hotel staff console</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                    <a href="${escapeHtml(t.track_url)}" class="mp-btn !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
+                        <i class="bi bi-chat-dots"></i> Live Chat
+                    </a>
+                    <a href="tel:0" class="mp-btn-ghost !min-h-[36px] !py-1.5 !px-2.5 !text-xs">
+                        <i class="bi bi-telephone"></i> Call Ext. 0
+                    </a>
+                </div>
+            `;
+        }
+        const feed = document.getElementById('aiChatFeed');
+        if (feed) feed.scrollTop = feed.scrollHeight;
+    })
+    .catch(() => {
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+        renderAiErrorBubble('Connection error while creating ticket. Please retry or dial Ext. 0.');
     });
 }
 

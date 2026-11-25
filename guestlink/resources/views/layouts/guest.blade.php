@@ -196,23 +196,28 @@
         const iconColor = notif.is_resolved ? '#86efac' : '#E6CB7E';
 
         toast.innerHTML = `
-            <div class="mp-icon" style="width:40px;height:40px;font-size:1.05rem;color:${iconColor};"><i class="bi ${iconClass}"></i></div>
-            <div style="flex-grow:1; min-width:0;">
-                <div style="display:flex; align-items:center; justify-content:space-between; gap:0.5rem;">
-                    <span class="glt-title" style="font-weight:700; font-size:0.85rem; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+            <div style="display:flex; flex-direction:column; gap:0.5rem; width:100%; min-width:0;">
+                <div style="display:flex; align-items:center; gap:0.6rem; min-width:0;">
+                    <div class="mp-icon" style="width:32px;height:32px;font-size:0.9rem;color:${iconColor};flex-shrink:0;"><i class="bi ${iconClass}"></i></div>
+                    <span class="glt-title" style="font-weight:700; font-size:0.82rem; color:#fff; flex:1 1 auto; min-width:0; line-height:1.25;">
                         ${escapeHtml(notif.title)}
                     </span>
-                    <span class="glt-badge" style="padding:0.15rem 0.5rem; border-radius:9999px; background:${notif.is_resolved ? 'rgba(34,197,94,0.2)' : 'rgba(201,168,76,0.2)'}; color:${notif.is_resolved ? '#86efac' : '#E8D08D'}; border:1px solid ${notif.is_resolved ? 'rgba(34,197,94,0.4)' : 'rgba(201,168,76,0.4)'}; font-size:0.65rem; font-weight:600;">
-                        Live Update
+                    <span class="glt-badge" style="padding:0.15rem 0.5rem; border-radius:9999px; background:${notif.is_resolved ? 'rgba(34,197,94,0.18)' : 'rgba(201,168,76,0.18)'}; color:${notif.is_resolved ? '#86efac' : '#E8D08D'}; border:1px solid ${notif.is_resolved ? 'rgba(34,197,94,0.4)' : 'rgba(201,168,76,0.4)'}; font-size:0.64rem; font-weight:700; white-space:nowrap; flex-shrink:0; line-height:1.2;">
+                        Live
                     </span>
+                    <button type="button" aria-label="Dismiss notification" onclick="this.closest('.guest-live-toast')?.remove()" style="background:transparent;border:0;color:#94A3B8;padding:0.15rem;line-height:1;cursor:pointer;flex-shrink:0;font-size:0.85rem;">
+                        <i class="bi bi-x-lg"></i>
+                    </button>
                 </div>
-                <div class="glt-msg" style="font-size:0.75rem; color:#CBD5E1; margin-top:2px; line-height:1.3;">
-                    ${escapeHtml(notif.message)}
+                <div style="display:flex; align-items:flex-end; justify-content:space-between; gap:0.65rem; padding-left:2.6rem;">
+                    <div class="glt-msg" style="font-size:0.75rem; color:#CBD5E1; line-height:1.38; flex:1 1 auto; min-width:0;">
+                        ${escapeHtml(notif.message)}
+                    </div>
+                    <a href="${escapeHtml(notif.url)}" class="glt-btn" style="padding:0.32rem 0.65rem; font-size:0.72rem; font-weight:600; white-space:nowrap; flex-shrink:0; border-radius:8px; background:rgba(255,255,255,0.1); color:#fff; border:1px solid rgba(255,255,255,0.2); text-decoration:none;">
+                        View &rarr;
+                    </a>
                 </div>
             </div>
-            <a href="${escapeHtml(notif.url)}" class="glt-btn" style="padding:0.35rem 0.65rem; font-size:0.75rem; white-space:nowrap; border-radius:8px; background:rgba(255,255,255,0.1); color:#fff; border:1px solid rgba(255,255,255,0.2); text-decoration:none;">
-                View &rarr;
-            </a>
         `;
 
         container.appendChild(toast);
